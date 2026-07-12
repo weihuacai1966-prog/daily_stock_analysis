@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,11 +27,12 @@ except ModuleNotFoundError:
 try:
     from fastapi.testclient import TestClient
     from api.app import create_app
-    from api.v1.endpoints.history import get_history_detail, get_stock_bar
+    from api.v1.endpoints.history import get_history_detail, get_history_list, get_stock_bar
 except ModuleNotFoundError:
     TestClient = None
     create_app = None
     get_history_detail = None
+    get_history_list = None
     get_stock_bar = None
 
 from src.config import Config
@@ -152,6 +154,35 @@ class AnalysisHistoryTestCase(unittest.TestCase):
             else:
                 os.environ[key] = value
         self._temp_dir.cleanup()
+
+    def test_history_timestamps_include_server_timezone_offset(self) -> None:
+        serialized = HistoryService._serialize_created_at(datetime(2026, 7, 11, 0, 30))
+
+        self.assertIsNotNone(serialized)
+        self.assertRegex(serialized or "", r"[+-]\d{2}:\d{2}$")
+
+    def test_history_query_failure_is_not_returned_as_an_empty_success(self) -> None:
+        db = MagicMock()
+        db.get_analysis_history_paginated.side_effect = RuntimeError("database unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            HistoryService(db).get_history_list(page=1, limit=20)
+
+        if get_history_list is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        with self.assertRaises(Exception) as raised:
+            get_history_list(
+                stock_code=None,
+                report_type=None,
+                start_date=None,
+                end_date=None,
+                page=1,
+                limit=20,
+                db_manager=db,
+            )
+
+        self.assertEqual(getattr(raised.exception, "status_code", None), 500)
 
     def _build_result(self) -> AnalysisResult:
         """构造分析结果"""
@@ -1536,6 +1567,65 @@ class AnalysisHistoryTestCase(unittest.TestCase):
         self.assertIsNone(report.meta.market_phase_summary)
         self.assertIsNone(report.details.analysis_context_pack_overview)
         self.assertIsNone(report.details.context_snapshot)
+
+    def test_history_detail_restores_market_structure_from_raw_result_without_snapshot(self) -> None:
+        """SAVE_CONTEXT_SNAPSHOT=false should still expose market_structure saved in raw_result."""
+        if get_history_detail is None:
+            self.skipTest("fastapi is not installed in this test environment")
+
+        market_structure = {
+            "schema_version": "market-structure-v1",
+            "status": "partial",
+            "market": "cn",
+            "market_theme_context": {
+                "schema_version": "market-theme-v1",
+                "status": "partial",
+                "market": "cn",
+                "active_themes": [{"name": "机器人概念"}],
+            },
+            "stock_market_position": {
+                "schema_version": "stock-market-position-v1",
+                "status": "partial",
+                "stock_code": "300024",
+                "market": "cn",
+                "primary_theme": {"name": "机器人概念"},
+            },
+        }
+        result = self._build_result()
+        result.market_structure_context = market_structure
+        query_id = "query_market_structure_snapshot_disabled_001"
+        saved = self.db.save_analysis_history(
+            result=result,
+            query_id=query_id,
+            report_type="simple",
+            news_content="新闻摘要",
+            context_snapshot={"market_structure_context": {"ignored": True}},
+            save_snapshot=False,
+        )
+        self.assertGreater(saved, 0)
+
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.query_id == query_id).first()
+            if row is None:
+                self.fail("未找到保存的历史记录")
+            self.assertEqual(row.id, saved)
+            self.assertIsNone(row.context_snapshot)
+            record_id = row.id
+
+        report = get_history_detail(str(record_id), db_manager=self.db)
+        self.assertIsNone(report.details.context_snapshot)
+        self.assertEqual(
+            report.details.market_structure["market_theme_context"]["active_themes"][0]["name"],
+            "机器人概念",
+        )
+        self.assertEqual(
+            report.details.raw_result["market_structure_context"]["market_theme_context"]["active_themes"][0]["name"],
+            "机器人概念",
+        )
+        self.assertNotIn(
+            "raw_result",
+            report.details.raw_result,
+        )
 
     def test_history_markdown_localizes_english_report_and_placeholder_name(self) -> None:
         """History markdown should preserve report_language for English reports."""

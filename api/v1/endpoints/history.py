@@ -48,6 +48,7 @@ from src.utils.data_processing import (
     normalize_model_used,
     extract_fundamental_detail_fields,
     extract_board_detail_fields,
+    extract_market_structure_detail_field,
     extract_realtime_detail_fields,
 )
 from src.analysis_context_pack_overview import (
@@ -385,9 +386,7 @@ def get_stock_bar(
                     action=action_fields["action"],
                     action_label=action_fields["action_label"],
                     analysis_count=analysis_count,
-                    last_analysis_time=(
-                        record.created_at.isoformat() if record.created_at else None
-                    ),
+                    last_analysis_time=service._serialize_created_at(record.created_at),
                     model_used=normalize_model_used(model_used),
                     market_phase_summary=service._display_market_phase_summary(
                         record.code,
@@ -541,6 +540,10 @@ def get_history_detail(
             context_snapshot=result.get("context_snapshot"),
             fallback_fundamental_payload=fallback_fundamental,
         )
+        market_structure = extract_market_structure_detail_field(
+            result.get("context_snapshot"),
+            result.get("raw_result"),
+        )
 
         details = ReportDetails(
             news_content=result.get("news_content"),
@@ -552,6 +555,7 @@ def get_history_detail(
             belong_boards=extracted_boards.get("belong_boards"),
             sector_rankings=extracted_boards.get("sector_rankings"),
             concept_rankings=extracted_boards.get("concept_rankings"),
+            market_structure=market_structure,
         )
         
         return AnalysisReport(
