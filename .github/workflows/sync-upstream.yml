@@ -2,6 +2,7 @@ name: Sync Upstream
 
 permissions:
   contents: write
+  workflows: write
 
 on:
   # 每12小时同步一次
